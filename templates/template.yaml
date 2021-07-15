@@ -1,0 +1,169 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "A Lambda function trigger by an API-Gateway through an SQS Queue for buffering"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  ServiceName:
+    Default: ApigwSqsLambda
+    Description: Name of the service
+    Type: String
+  Environment:
+    Description: Environment to deploy. Use staging for limited resources and no alerts.
+    Type: String
+    Default: Staging
+    AllowedValues:
+      - Staging
+      - Production
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Choose service and environment
+        Parameters:
+          - ServiceName
+          - Environment
+
+Resources:
+  ######################################################################
+  # SQS Queue
+  ######################################################################
+
+  LambdaSqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      ContentBasedDeduplication: true
+      FifoQueue: true
+      MaximumMessageSize: 262144
+      MessageRetentionPeriod: 1209600
+      QueueName: !Sub "Softcomweb-${ServiceName}-${Environment}.fifo"
+      Tags:
+        - Key: company
+          Value: softcomweb
+
+  ApiGatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${ServiceName}-LogGroup-${Environment}"
+      RetentionInDays: 1
+
+  ######################################################################
+  # API Gateway
+  ######################################################################
+
+  ApiGateway:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiGatewayAccessLogGroup.Arn
+        Format: '{ "requestId": "$context.requestId", "ip": "$context.identity.sourceIp", "requestTime": "$context.requestTime", "httpMethod": "$context.httpMethod", "routeKey": "$context.routeKey", "status": "$context.status", "protocol": "$context.protocol", "responseLength": "$context.responseLength" }'
+      DefinitionBody:
+        "Fn::Transform":
+          Name: "AWS::Include"
+          Parameters:
+            Location: "api.yaml"
+
+  ######################################################################
+  # Lambda Function
+  ######################################################################
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: Lambda function to be invoked by the SQS Queue
+      FunctionName: LambdaFunction
+      Handler: app.handler
+      Runtime: nodejs14.x
+      Timeout: 3
+      MemorySize: 128
+      CodeUri: ../src/
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LambdaSqsQueue.Arn
+            BatchSize: 10
+
+  ######################################################################
+  # Api Role
+  ######################################################################
+
+  ApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service:
+              - apigateway.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: Apigw-sqs-send-msg-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueUrl
+                  - sqs:SendMessageBatch
+                Resource: !GetAtt LambdaSqsQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: !GetAtt ApiGatewayAccessLogGroup.Arn
+
+  ######################################################################
+  # Parameter store entries
+  ######################################################################
+
+  SqsQueueParameterArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/applications/${ServiceName}/${Environment}/default/sqs_queue_arn"
+      Type: String
+      Description: "SQS Queue arn"
+      Value: !GetAtt LambdaSqsQueue.Arn
+
+  HttpEndpointUrl:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/application/${ServiceName}/${Environment}/default/http_endpoint_url"
+      Type: String
+      Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com"
+
+  SqsQueueUrl:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/application/${ServiceName}/${Environment}/default/sqs_queue_url"
+      Type: String
+      Value: !Ref LambdaSqsQueue
+######################################################################
+# Outputs
+######################################################################
+
+Outputs:
+  MyHttpApiEndPoint:
+    Description: "Http Api Endpoint URI"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com"
+
+  MyLambdaFunction:
+    Description: "My lambda function which will be invoked by SQS"
+    Value: !Ref LambdaFunction
+
+  MySqsQueueArn:
+    Description: "My Sqs Queue Arn"
+    Value: !GetAtt LambdaSqsQueue.Arn
+
+  MySqsQueueURL:
+    Description: "My Sqs Queue URL"
+    Value: !Ref LambdaSqsQueue
