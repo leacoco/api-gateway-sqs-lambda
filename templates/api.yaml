@@ -17,7 +17,7 @@ paths:
         payloadFormatVersion: "1.0"
         requestParameters:
           MessageBody: "$request.body"
-          MessageGroupId: 123
+          MessageGroupId: "$request.body.TeamName"
           QueueUrl:
             Ref: LambdaSqsQueue
 
